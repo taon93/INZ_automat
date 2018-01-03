@@ -1,0 +1,281 @@
+/*
+ * sterownikwalidator.cpp
+ *
+ * Created: 2017-12-21 19:20:55
+ * Author : taon
+ */ 
+
+#include <avr/io.h>
+#include <util/delay.h>
+#include <avr/interrupt.h>
+
+#define IOCOM	DDRA
+#define BUTDIR	DDRA
+#define LEDDIR	DDRC
+
+#define DATASET	PORTA
+#define B_SET	PORTA
+#define LEDSET	PORTC
+
+#define B_STATE PINA
+
+#define B_EN	0
+#define B_DATA1 1
+#define B_DATA2 2
+#define B_DATA3 3
+#define B_ERR	4
+#define B_NPASS 5
+#define BUT_MASK ((1<<B_EN)|(1<<B_DATA1)|(1<<B_DATA2)|(1<<B_DATA3)|(1<<B_ERR)|(1<<B_NPASS))
+
+#define LED_D1	0
+#define LED_D2	1
+#define LED_D3	2
+#define LED_ER	3
+#define LED_NP	4
+#define LED_BL	5	// coin blockade
+#define LED_CD1	6	// coin direction
+#define LED_CD2	7
+#define LED_MASK ((1<<LED_D1)|(1<<LED_D2)|(1<<LED_D3)|(1<<LED_ER)|(1<<LED_NP)|(1<<LED_BL)|(1<<LED_CD1)|(1<<LED_CD2))
+#define DATA_MASK ((1<<LED_D1)|(1<<LED_D2)|(1<<LED_D3))
+
+#define F_CPU 1000000UL	//CPU clock frequency
+#define BAUD 4800	//BAUD RATE
+#define MYUBRR F_CPU/16/BAUD-1
+
+void check_b(uint8_t *wsk, uint8_t *press);
+uint8_t c_status(uint8_t ev);
+//USART - DEKLARACJE
+void led_set(uint8_t leds, uint8_t t);
+uint8_t coin_value(uint8_t coin);
+void usart_init(unsigned int ubbr);		//initialization
+void usart_send(uint8_t data);			//transmitting
+uint8_t usart_read(void);					//receiving 
+
+int main(void)
+{
+	
+	// INICJALIZACJA USART
+	
+	BUTDIR	&=	~BUT_MASK;	//Piny od przycisków na wejście
+	B_SET	|=	BUT_MASK;	//Podciągnięcie przycisków do 1
+	LEDDIR	|=	LED_MASK;	//Piny od diod na wyjście
+	LEDSET	&=	~LED_MASK;	//Zgaszenie wszystkich diód
+	
+	usart_init(MYUBRR);
+	
+	uint8_t buttons = 0;	//stan logiczny na przyciskach
+	uint8_t cstat = 0;
+	uint8_t wal_res = 0;	// czy wystąpiły jakieś problemy przy wrzucaniu monety
+	uint8_t pressed = 0;
+	
+	sei();
+    while (1) 
+    {
+			check_b(&buttons,&pressed);
+			if(buttons >= 2)
+			{
+				// zamknięcie łuzy
+				cstat |= c_status(7);
+				// ustawianie ledów
+				cstat ^= c_status(buttons); 
+				led_set(cstat,0);
+			}
+			// IF UART RX state 3
+			if(buttons == 1)
+			{
+				led_set(0,3); // wyłączenie diód
+				// zostaje odczytany stan monety
+				if(cstat & ((1<<LED_D1)|(1<<LED_D2)|(1<<LED_D3))) // jest jakaś wartość monety która zosała wrzucona
+				{
+					if(cstat & (1<<LED_NP))
+					{
+						wal_res = 1;
+						usart_send(0b11110100);
+						for(int i = 0; i < 10; i++)
+						{
+							led_set(1<<LED_NP,1);
+							_delay_ms(50);
+							led_set(1<<LED_NP,2);
+							_delay_ms(50);
+						}
+						led_set(0,3);
+					}
+					if(cstat & (1<<LED_ER)) // jest dioda określająca błąd
+					{
+						wal_res = 1;
+						// wysłanie komunikatu o błedzie do sterownika
+						usart_send(0b11110100);
+						for(int i = 0; i < 10; i++)
+						{
+							led_set(1<<LED_ER,1);
+							_delay_ms(50);
+							led_set(1<<LED_ER,2);
+							_delay_ms(50);
+						}
+						led_set(0,3);
+					}
+					if(!wal_res) // nie było rzadnego błędu
+					{
+						//wysłanie komunikatu o kwocie do sterownika
+						if(coin_value(cstat))
+						{
+						usart_send(coin_value(cstat));
+						for(int i = 0; i < 5; i++)
+						{
+							led_set(0xff & LED_MASK,0);
+							_delay_ms(100);
+							led_set(0xff & LED_MASK,0);
+							_delay_ms(100);
+						}
+						led_set(0,3);
+						}
+						else
+						{
+							for(int i = 0; i < 10; i++)		//	TYMCZASOWO PÓKI NIE MA KOMUNIKACJI Z UART
+							{
+								led_set(1<<LED_NP,1);
+								_delay_ms(50);
+								led_set(1<<LED_NP,2);
+								_delay_ms(50);
+							}
+							led_set(0,3);
+						}
+					}
+				}
+				cstat = 0;
+				wal_res = 0;
+			}
+    }
+}
+void check_b(uint8_t *wsk, uint8_t *press) // zwraca który przycisk został wciśnięty
+{
+	if((B_STATE & BUT_MASK) != BUT_MASK)
+	{
+		if(*press == 0)
+		{
+			*press = 1;
+			_delay_ms(50);
+			if(~(B_STATE) & (1<<B_EN))
+			{
+				*wsk = 1;
+				return;
+			}
+			if(~(B_STATE) & (1<<B_DATA1))
+			{
+				*wsk = 2;
+				return;
+			}
+			if(~(B_STATE) & (1<<B_DATA2))
+			{
+				*wsk = 3;
+				return;
+			}
+			if(~(B_STATE) & (1<<B_DATA3))
+			{
+				*wsk = 4;
+				return;
+			}
+			if(~(B_STATE) & (1<<B_ERR))
+			{
+				*wsk = 5;
+				return;
+			}
+			if(~(B_STATE) & (1<<B_NPASS))
+			{
+				*wsk = 6;
+				return;
+			}
+		}
+		*wsk = 0;
+	}
+	else
+	{
+		*press = 0;
+		*wsk = 0;
+	}
+	
+}
+uint8_t c_status(uint8_t ev) /*obsługa zdarzeń: 
+#0 zerowanie stanu przycisków
+#1-#6 wciśnięty przycisk.
+#7 zostaje zamknięta łuza do wrzucania monet
+#8 Wpadła legalna moneta
+*/
+{
+	switch(ev)
+	{
+		case 1:
+		return 0;
+		case 2:
+		return (1<<LED_D1);
+		case 3:
+		return (1<<LED_D2);
+		case 4:
+		return (1<<LED_D3);
+		case 5:
+		return (1<<LED_ER);
+		case 6:
+		return (1<<LED_NP);
+		case 7:
+		return (1<<LED_BL);
+		case 8:
+		return (1<<LED_CD1);
+		case 9:
+		return (1<<LED_CD2);
+	}
+	return 0xff;
+}
+void led_set(uint8_t leds,uint8_t t)
+{
+	switch(t)
+	{
+		case 0:
+		LEDSET ^= leds;
+		break;
+		case 1:
+		LEDSET |= leds;
+		break;
+		case 2:
+		LEDSET &= ~leds;
+		break;
+		case 3:
+		LEDSET = leds;
+		break;
+	}
+}
+void usart_init(unsigned int ubbr)
+{
+	UBRR0H = (unsigned char) (ubbr >> 8);
+	UBRR0L = (unsigned char) ubbr;
+	UCSR0B = (1<<RXEN0) | (1<<TXEN0);		//enable receiving and transmitting data
+	UCSR0C = (1<<USBS0)|(3<<UCSZ00);		//8 bits 2 stop bits
+}
+void usart_send(uint8_t data)
+{
+	while ( !( UCSR0A & (1<<UDRE0)) ) ;
+	UDR0 = data;
+}
+uint8_t usart_read(void)
+{
+	while ( !(UCSR0A & (1<<RXC0)) ) ;
+	return UDR0;
+}
+uint8_t coin_value(uint8_t coin)
+{
+	switch(coin & DATA_MASK)
+	{
+		case (1<<LED_D1):
+			return 0b10001000;
+		case (1<<LED_D2):
+			return 0b01001000;
+		case (1<<LED_D3):
+			return 0b00101000;
+		case ((1<<LED_D3)|(1<<LED_D2)):
+			return 0b00011000;
+		case ((1<<LED_D3)|(1<<LED_D1)):
+			return 0b10011000;
+		case ((1<<LED_D3)|(1<<LED_D2)|(1<<LED_D1)):
+			return 0b01011000;
+	}
+	return 0;
+}
