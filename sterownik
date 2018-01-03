@@ -1,0 +1,207 @@
+
+/*
+ * sterownikINZ.cpp
+ *
+ * Created: 2017-12-19 17:24:46
+ * Author : Maciej Nabialek
+ */ 
+
+#include <avr/io.h>
+#include <stdlib.h>
+#include <util/delay.h>
+#include <avr/interrupt.h>
+#include "HD44780.h"
+#define TRUE 1
+#define FALSE 0
+#define BUT_DIR DDRB				//ustawia kierunek danych przyciskow 
+#define BUT_SET PORTB
+#define BUT1	(1<<PB3)
+#define BUT2	(1<<PB2)
+#define BUT3	(1<<PB1)
+#define BUT4	(1<<PB0)
+#define BUTMASK	(BUT1|BUT2|BUT3|BUT4)
+#define STAT_BUT PINB
+
+//#define DD_MOTOR DDRA			// ustawia kierunek danych silnikow
+//#define DD_SENSOR DDRD			// ustawia kierunek danych czujnikow zblizeniowych
+//#define STAT_SENSOR PINB7		// status czujnika zbliżeniowego
+
+#define BAUD 9600	//BAUD RATE
+#define MYUBRR F_CPU/16/BAUD-1
+
+//----------------DEKLARACJE FUNKCJI---------------------------
+void but_pressed(uint8_t *val,uint8_t *wsk);
+void usart_init(unsigned int ubbr);		//initialization
+void usart_send(uint8_t data);			//transmitting
+uint8_t usart_read(void);				//receiving
+void wal_event(uint8_t walcode);
+void but_event(uint8_t butnr, int productvalue[], int *left);
+void numberdisp(int i);
+//-----------------ZMIENNE GLOBALNE----------------------------
+uint8_t butblocade = 0;
+
+int cost[4] = {250,300,200,350};	//ile co kosztuje
+int chenger[6] = {30,30,30,20,20,0};
+int isin = 0;					//ile wrzucono
+	
+int main(void)
+{
+//-------------INICJALIZACJA-----------------------
+	BUT_DIR &= ~BUTMASK;			
+	BUT_SET |= BUTMASK;				
+	DDRB |= 1<<4;
+	PORTB |= 1<<4;
+	sei();	
+	LCD_Initalize();
+	usart_init(MYUBRR);	
+	
+//--------------INICJALIZACJA ZMIENNYCH------------------------
+	uint8_t pressed = 0;
+	uint8_t butval = 0;
+	uint8_t wdata = 0b11110100;
+	0;
+	int coinwalue[6] = {10,20,50,100,200,500};
+	int left;						//ile jeszcze trzeba wrzucić
+	int i = 0;
+//-------------------------------------------------------------
+	LCD_Clear();
+	LCD_WriteText("Insert coin");
+	while (1)
+	{
+		while(i == 5000)
+		{
+			PORTB^=1<<4;
+			i = 0;
+		}
+		i++;
+		but_pressed(&butval,&pressed);
+		if(butval )//&& butblocade==0)
+		{
+			but_event(butval,cost,&left);
+		}
+		//wdata = usart_read();
+		//wal_event(wdata);
+	}
+}
+//------------------DEFINICJE FUNKCJI----------------------------
+void but_pressed(uint8_t *val,uint8_t *wsk)
+{
+
+	if((STAT_BUT & BUTMASK) != BUTMASK)	
+	{
+		
+		if((*wsk == 0))// && (STAT_BUT & BUTMASK == temp))
+		{
+			*wsk = 1;
+			_delay_ms(50);
+			if(~STAT_BUT & BUT1)
+			{
+				*val = 1;
+				return;
+			}
+			if(~STAT_BUT & BUT2)
+			{
+				*val = 2;
+				return;
+			}
+			if(~STAT_BUT & BUT3)
+			{
+				*val = 3;
+				return;
+			}
+			if(~STAT_BUT & BUT4)
+			{
+				*val = 4;
+				return;
+			}
+		}
+		*val = 0;
+	}
+	else
+	{	
+		*wsk = 0;
+		*val = 0;
+	}
+}
+void usart_init(unsigned int ubbr)
+{
+	UBRRH = (unsigned char) (ubbr >> 8);
+	UBRRL = (unsigned char) ubbr;
+	UCSRB = (1<<RXEN) | (1<<TXEN);		//enable receiving and transmitting data
+	UCSRC = (1<<URSEL)|(1<<USBS)|(3<<UCSZ0);		//8 bits 2 stop bits
+}
+void usart_send(uint8_t data)
+{
+	while ( !( UCSRA & (1<<UDRE)) ) ;
+	UDR = data;
+}
+uint8_t usart_read(void)
+{
+	while ( !(UCSRA & (1<<RXC)) ) ;
+	return UDR;
+}
+void wal_event(uint8_t walcode)
+{
+	switch (walcode)
+	{
+		case 0b11110100:	//błąd z walidatora
+		usart_send(0b01100100);
+		LCD_Clear();
+		LCD_WriteText("ERROR");
+		butblocade = 1;
+		break;
+		case 0b10001000:	//10gr
+		LCD_Clear();
+		LCD_WriteText("10 gr");
+		break;
+		case 0b01001000:	//20gr
+		LCD_Clear();
+		LCD_WriteText("20 gr");
+		break;
+		case 0b00101000:	//50gr
+		LCD_Clear();
+		LCD_WriteText("50 gr");
+		break;
+		case 0b00011000:	//1zł
+		LCD_Clear();
+		LCD_WriteText("1 zl");
+		break;
+		case 0b10011000:	//2zł
+		LCD_Clear();
+		LCD_WriteText("2 zl");
+		break;
+		case 0b01011000:	//5zł
+		LCD_Clear();
+		LCD_WriteText("5 zl");
+		break;
+		case 0b11000100:	//pytanie o monety do walidatora
+		usart_send(0b00110100);
+		break;
+		case 0b10010100:	//koniec wydawania
+		usart_send(0b10010100);
+		break;
+	}
+}
+void but_event(uint8_t butnr, int productvalue [], int *left)
+{
+	int temp;
+	LCD_Clear();
+	LCD_WriteText("Product nr ");
+	numberdisp(butnr);
+	LCD_GoTo(0,1);
+	*left = productvalue[butnr - 1];
+	temp = *left / 100;
+	LCD_WriteText("Insert: ");
+	numberdisp(temp);
+	LCD_WriteText(".");
+	temp = *left % 100;
+	numberdisp(temp);
+	LCD_WriteText("$");
+
+}
+void numberdisp(int i)
+{
+ char temp [16];
+ itoa(i,temp,10);
+ LCD_WriteText(temp);
+}
